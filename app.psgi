@@ -1,72 +1,173 @@
-use strict;
-use warnings;
-use utf8;
-use File::Spec;
-use File::Basename;
-use lib File::Spec->catdir(dirname(__FILE__), 'extlib', 'lib', 'perl5');
-use lib File::Spec->catdir(dirname(__FILE__), 'lib');
+use common::sense;
 use Amon2::Lite;
+use Data::Util qw!:check!;
+use Date::Manip;
+use DBI;
+use FindBin;
+use JSON;
+use Log::Minimal;
+use Net::OAuth2::Client;
+use Path::Class;
+use Plack::Session::Store::DBI;
+
+our $BASE_DIR;
+BEGIN { $BASE_DIR = dir($FindBin::Bin); }
+use lib $BASE_DIR->subdir(qw!extlib lib perl5!)->stringify;
+use lib $BASE_DIR->subdir('lib')->stringify;
+
 
 our $VERSION = '0.01';
+
+our $MOVES_CALLBACK_PATH = '/auth/moves/callback';
 
 # put your configuration here
 sub load_config {
     my $c = shift;
 
     my $mode = $c->mode_name || 'development';
+    my $db_path = $BASE_DIR->file(lc("db/$mode.db"));
+    $db_path->parent->mkpath unless -d $db_path->parent;
 
     +{
-        'DBI' => [
-            'dbi:SQLite:dbname=$mode.db',
+        'Text::Xslate' => +{
+            function => +{
+                UnixDate => sub { UnixDate @_; },
+            },
+        },
+        DBI => [
+            "dbi:SQLite:dbname=$db_path",
             '',
             '',
         ],
+        site => +{
+            client_id => $ENV{MOVES_CLIENT_ID},
+            client_secret => $ENV{MOVES_CLIENT_SECRET},
+            site => 'https://api.moves-app.com',
+            authorize_path => 'moves://app/authorize',
+            authorize_path_for_pc => 'https://api.moves-app.com/oauth/v1/authorize',
+            access_token_path => 'https://api.moves-app.com/oauth/v1/access_token',
+        },
     }
 }
 
-get '/' => sub {
-    my $c = shift;
-    return $c->render('index.tt');
-};
+{
+    my $dbh;
+
+    sub get_dbh { #{{{
+        return $dbh if defined $dbh;
+
+        my $config = __PACKAGE__->config;
+        $dbh = DBI->connect(@{$config->{DBI}});
+        my $driver_name = $dbh->{Driver}{Name};
+        my $fname = $BASE_DIR->file(lc("sql/$driver_name.sql"));
+        my $sql = $fname->slurp or die "$fname: $!";
+        for my $stmt (split /;/, $sql) {
+            next unless $stmt =~ /\S/;
+            $dbh->do($stmt) or die $dbh->errstr;
+        }
+
+        return $dbh;
+    } #}}}
+}
+
+get '/' => sub { my $c = shift; #{{{
+    if ($c->session->get('access_token')) {
+        return $c->render('index.tt');
+
+    } else {
+        my %stash;
+        $stash{moves_authorize_uri} = client($c)->authorize(
+            redirect_uri => redirect_uri($c),
+            scope => 'activity',
+        );
+
+        return $c->render('signin.tt', \%stash);
+    }
+}; #}}}
+
+get '/moves/logout' => sub { my $c = shift; #{{{
+    $c->session->set(access_token => undef);
+    $c->redirect('/');
+}; #}}}
+
+get $MOVES_CALLBACK_PATH => sub { my $c = shift; #{{{
+    $c->session->set(access_token => access_token($c)->session_freeze);
+    $c->redirect('/');
+}; #}}}
+
+get '/moves/profile' => sub { my $c = shift; #{{{
+    my $res = access_token($c)->get('/api/v1/user/profile');
+    my %stash;
+    $stash{data} = decode_json $res->content;
+
+    return $c->render('profile.tt', \%stash);
+}; #}}}
+
+get '/moves/recent' => sub { my $c = shift; #{{{
+    my $from = UnixDate '6 days ago' => '%Y%m%d';
+    my $to = UnixDate today => '%Y%m%d';
+    my $res = access_token($c)
+        ->get("/api/v1/user/summary/daily?from=$from&to=$to");
+    my %stash;
+    $stash{data} = decode_json $res->content;
+    $stash{steps} = [map {
+        my $summary = $_->{summary};
+        is_array_ref($summary) ?
+            (grep { $_->{activity} eq 'wlk' } @$summary)[0]->{steps} : 0;
+    } @{$stash{data}}];
+
+    infof \%stash;
+
+    return $c->render('recent.tt', \%stash);
+}; #}}}
 
 # load plugins
 __PACKAGE__->load_plugin('Web::CSRFDefender');
-# __PACKAGE__->load_plugin('DBI');
+__PACKAGE__->load_plugin('DBI');
 # __PACKAGE__->load_plugin('Web::FillInFormLite');
 # __PACKAGE__->load_plugin('Web::JSON');
 
-__PACKAGE__->enable_session();
+__PACKAGE__->enable_session(
+    store => Plack::Session::Store::DBI->new(
+        get_dbh => \&get_dbh,
+    ),
+);
+__PACKAGE__->enable_middleware('Log::Minimal',
+    autodump => 1,
+);
+
+__PACKAGE__->add_trigger(BEFORE_DISPATCH => sub { my $c = shift;
+    $c->redirect('/') if $c->req->path_info =~ m!^/moves!
+        && ! defined $c->session->get('access_token');
+});
 
 __PACKAGE__->to_app(handle_static => 1);
 
-__DATA__
+# helpers
+sub client { my $c = shift; #{{{
+    my %config = %{$c->config->{site}};
+    $config{authorize_path} = $config{authorize_path_for_pc}
+        unless $c->req->header('User-Agent') =~ /iPhone/;
 
-@@ index.tt
-<!doctype html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>moves::api::demo::perl</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.0/jquery.min.js"></script>
-    <script type="text/javascript" src="[% uri_for('/static/js/main.js') %]"></script>
-    <link rel="stylesheet" href="http://twitter.github.com/bootstrap/1.4.0/bootstrap.min.css">
-    <link rel="stylesheet" href="[% uri_for('/static/css/main.css') %]">
-</head>
-<body>
-    <div class="container">
-        <header><h1>moves::api::demo::perl</h1></header>
-        <section class="row">
-            This is a moves::api::demo::perl
-        </section>
-        <footer>Powered by <a href="http://amon.64p.org/">Amon2::Lite</a></footer>
-    </div>
-</body>
-</html>
+    return Net::OAuth2::Profile::WebServer->new(%config);
+} #}}}
 
-@@ /static/js/main.js
+sub redirect_uri { my $c = shift; #{{{
+    my $uri = $c->req->uri;
+    $uri->path($MOVES_CALLBACK_PATH);
+    $uri->query_form(+{});
 
-@@ /static/css/main.css
-footer {
-    text-align: right;
-}
+    return $uri;
+} #}}}
+
+sub access_token { my $c = shift; #{{{
+    my $access_token = $c->session->get('access_token');
+    if (defined $access_token) {
+        return Net::OAuth2::AccessToken->session_thaw($access_token,
+            profile => client($c),
+        );
+    } else {
+        return client($c)->get_access_token(
+            $c->req->param('code'), redirect_uri => redirect_uri($c));
+    }
+} #}}}

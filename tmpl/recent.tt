@@ -1,0 +1,32 @@
+[% WRAPPER 'layout.tt' %]
+<div data-role="page" id="recent">
+  <div data-role="header"><h1>Moves API Demo - Recent Activity</h1></div>
+  <div data-role="content">
+    <div id="chart"></div>
+
+    <ul data-role="listview" data-inset="true">
+    [% FOREACH day IN data.reverse() %]
+      [%
+        weekday = UnixDate(day.date, '%a');
+        step = '0';
+        IF day.summary
+          FOREACH d IN day.summary
+            IF d.activity == 'wlk'
+              step = d.steps
+            END #IF
+          END #FOREACH
+        END #IF
+        level = step > 10000 ? ' over-10000' : step > 5000 ? ' over-5000' : '';
+      %]
+      <li>
+        <span class="[%= weekday %]">[% UnixDate(day.date, '%Y/%m/%d %a') %]</span>
+        <p class="ui-li-aside[%= level %]">[% step %] steps</p>
+      </li>
+    [% END %][%# FOREACH %]
+    </ul>
+  </div>
+  <script>
+    //visualize([[% steps.join(",") %]]);
+  </script>
+</div>
+[% END %][%# WRAPPER %]

@@ -1,0 +1,15 @@
+.Sat {
+    color: blue;
+}
+.Sun {
+    color: red;
+}
+
+.over-10000 {
+    font-weight: bold;
+    color: darkgoldenrod;
+}
+.over-5000 {
+    font-weight: bold;
+    color: maroon;
+}
