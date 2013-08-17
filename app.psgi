@@ -6,9 +6,11 @@ use DBI;
 use FindBin;
 use JSON;
 use Log::Minimal;
-use Net::OAuth2::Client;
 use Path::Class;
 use Plack::Session::Store::DBI;
+
+use lib "$ENV{HOME}/git/perl-Net-Moves/lib";
+use Net::Moves;
 
 our $BASE_DIR;
 BEGIN { $BASE_DIR = dir($FindBin::Bin); }
